@@ -39,14 +39,8 @@ A beep pattern of 1, 2, or 3 beeps identifies the current mode.
 When in config mode:
 Each press of the dit key increases the WPM
 Each press of the dah key decreases the WPM
-Pressing both dit and dah keys resets the WPM to its default value
+Pressing both dit and dah keys announces the current WPM using Morse code.
 
-Changing the WPM value is announced by a beep pattern.
-
-WPM beep pattern examples:
-10 = 1 low-tone beep
-12 = 1 low-tone beeps followed by 2 higher-tone beeps
-25 = 2 low-tone beeps followed by 5 higher-tone beeps
 
 The WPM range is from 10WPM to 25WPM.
 The initial default WPM setting is 15WPM.

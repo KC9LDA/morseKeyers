@@ -23,8 +23,12 @@ const int ditdahMode = 0;   // normal/dit-dah mode
 const int configMode = 1;   // configuration mode
 const int recallMode = 2;   // recall message mode
 
+const int iambicA    = 0;   // iambic key mode A
+const int iambicB    = 1;   // iambic key mode B
+const int straight   = 2;   // straight key mode
+
 const int minWpm  = 10;     // min speed
-const int midWpm  = 15;     // initial speed
+const int midWpm  = 18;     // initial speed
 const int maxWpm  = 25;     // max speed
 
 const int skHz    = 220;    // beep @A4 at WPM limit
@@ -36,14 +40,16 @@ const int beepLen = 69;     // system beep  length
 const int beepDly = 99;     // system delay length
 const int swTmax  = 100;    // switch 1 timeout value
 
-const char *msg1  = "CQ CQ DE KJ7NLA KJ7NLA";
+const char *msg1  = "CQ CQ DE XXXXX XXXXX KN";
 const char *msg2  = "1234567890";
 const char *msg3  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 char mcode[8];              // morse code buffer
 
-int mode          = 0;      // normal/dit-dah mode
-int newMode       = 0;      // mode has changed
+int cmode         = 0;      // normal/dit-dah mode
+int kmode         = 0;      // iambic key mode A
+int newCmode      = 0;      // cmode has changed
+int newKmode      = 0;      // kmode has changed
 int newWPM        = 0;      // WPM has changed
 int letterDone    = 0;      // letter complete
 int wordDone      = 0;      // word   complete
@@ -56,6 +62,7 @@ int ditPaddle;              // dit paddle state
 int dahPaddle;              // dah paddle state
 int sw1Pushed;              // push-button state
 int sw1Timer;               // switch-press time
+int sw2Timer;               // switch-press time
 
 void sendMorseMsg(char *msg);
 void sendMorseChar(char acode);
@@ -66,6 +73,7 @@ void getDitLength(void);
 void readPaddles(void);
 void countSw1(void);
 void recallMsg(void);
+void doStright(void);
 void doDitDah(void);
 void doDit(void);
 void doDah(void);
@@ -88,7 +96,10 @@ void setup() {
   pinMode(pinSw1,  INPUT_PULLUP);
   pinMode(pinLed,  OUTPUT);
   pinMode(pinBuzz, OUTPUT);
-  mode = ditdahMode;
+  sw1Timer = 0;
+  sw2Timer = 0;
+  cmode = ditdahMode;
+  kmode = iambicA;
   Serial.begin(BAUDRATE);
   initWpm();
 }
@@ -103,9 +114,13 @@ void doError() {
 void loop() {
   readPaddles();
   if (ditPaddle || dahPaddle) {
-    switch (mode) {
+    switch (cmode) {
       case ditdahMode:
-        doDitDah();
+        if (kmode == straight) {
+          doStright();
+        } else {
+          doDitDah();
+        }
         break;
       case configMode:
         updateWpm();
@@ -341,6 +356,8 @@ void updateWpm() {
         Serial.println("At max WPM = 25");
         beepN(skHz, 2);
         delay(500);
+      } else {
+        beep(upHz);
       }
       break;
     case 2:
@@ -351,20 +368,18 @@ void updateWpm() {
         Serial.println("At min WPM = 10");
         beepN(skHz, 2);
         delay(500);
+      } else {
+        beep(dnHz);
       }
       break;
     case 3:
-      // press both paddles to reset WPM
-      actualWpm = midWpm;
-      Serial.println("Re-init WPM value");
-      beepN(skHz, 2);
-      delay(500);
+      // press both paddles to announce WPM
+      beepWPM();
       break;
     default:
       // no paddle is pressed
       break;
   }
-  beepWPM();
   getDitLength();
   printWPM();
 }
@@ -406,58 +421,109 @@ void readPaddles() {
 void countSw1() {
   // while sw1 is pushed
   while (sw1Pushed) {
-    sw1Timer++;
     readPaddles();
-    if (sw1Timer > swTmax) {
-      newMode = 1;
-      switch (mode) {
-        case ditdahMode:
-          mode = configMode;
-          sw1Timer = 0;
-          beepN(skHz, 2);
-          myDelay(500);
-          break;
-        case configMode:
-          if (newWPM) {
-            mode = ditdahMode;
-            // if we changed the WPM then return
-            // to normal/dit-dah mode
-            newWPM = 0;
+    if (ditPaddle) {
+      // cycle through iambic/straight key modes
+      sw1Timer = 0;
+      sw2Timer++;
+      if (sw2Timer > swTmax) {
+        newCmode = 0;
+        newKmode = 1;
+        switch (kmode) {
+          case iambicA:
+            kmode = iambicB;
+            sw2Timer = 0;
+            beepN(ddHz, 2);
+            myDelay(500);
+            break;
+          case iambicB:
+            kmode = straight;
+            sw2Timer = 0;
+            beepN(ddHz, 3);
+            myDelay(500);
+            break;
+          case straight:
+            kmode = iambicA;
+            sw2Timer = 0;
+            beepN(ddHz, 1);
+            myDelay(500);
+            break;
+          default:
+            doError();
+        }
+      }
+    } else {
+      // cycle through send/config/message modes
+      sw1Timer++;
+      if (sw1Timer > swTmax) {
+        newCmode = 1;
+        switch (cmode) {
+          case ditdahMode:
+            cmode = configMode;
+            sw1Timer = 0;
+            beepN(skHz, 2);
+            myDelay(500);
+            break;
+          case configMode:
+            if (newWPM) {
+              cmode = ditdahMode;
+              // if we changed the WPM then return
+              // to normal/dit-dah mode
+              newWPM = 0;
+              sw1Timer = 0;
+              beepN(skHz, 1);
+            } else {
+              // otherwise continue to the next mode
+              cmode = recallMode;
+              sw1Timer = 0;
+              beepN(skHz, 3);
+            }
+            myDelay(500);
+            break;
+          case recallMode:
+            cmode = ditdahMode;
             sw1Timer = 0;
             beepN(skHz, 1);
-          } else {
-            // otherwise continue to the next mode
-            mode = recallMode;
-            sw1Timer = 0;
-            beepN(skHz, 3);
-          }
-          myDelay(500);
-          break;
-        case recallMode:
-          mode = ditdahMode;
-          sw1Timer = 0;
-          beepN(skHz, 1);
-          myDelay(500);
-          break;
-        default:
-          doError();
+            myDelay(500);
+            break;
+          default:
+            doError();
+        }
       }
     }
   }
-  // if the new mode is config mode
-  // then echo the current WPM
-  if (newMode) {
-    newMode = 0;
-    switch (mode) {
+  // check if the key mode has changed
+  if (newKmode) {
+    newKmode = 0;
+    newCmode = 0;
+    switch (kmode) {
+      case iambicA:
+        Serial.println("kmode is iambicA");
+        break;
+      case iambicB:
+        Serial.println("kmode is iambicB");
+        break;
+      case straight:
+        Serial.println("kmode is straight");
+        break;
+      default:
+        doError();
+    }
+  }
+  // check if the config mode has changed
+  if (newCmode) {
+    newCmode = 0;
+    switch (cmode) {
       case ditdahMode:
-        Serial.println("new mode is dit/dah");
+        Serial.println("cmode is dit/dah");
         break;
       case configMode:
-        Serial.println("new mode is config");
+        Serial.println("cmode is config");
+        // echo the current WPM
         beepWPM();
         break;
       case recallMode:
-        Serial.println("new mode is recall");
+        Serial.println("cmode is recall");
         break;
       default:
         doError();
@@ -524,6 +590,17 @@ void doDitDah() {
   delayMicroseconds(150);
 }
 
+// straight key
+void doStright() {
+  while (ditPaddle || dahPaddle) {
+    digitalWrite(pinLed, HIGH);
+    tone(pinBuzz, ddHz);
+    readPaddles();
+  }
+  digitalWrite(pinLed, LOW);
+  noTone(pinBuzz);
+}
+
 // play dit
 void doDit() {
   digitalWrite(pinLed, HIGH);
@@ -574,14 +651,18 @@ void myDelay(int dly) {
 // play beep code for current WPM
 void beepWPM() {
   int N;
+  // first digit
   if (actualWpm >= 20) {
-    beepN(dnHz, 2);
+    sendMorseChar('2');
     N = actualWpm - 20;
   } else {
-    beepN(dnHz, 1);
+    sendMorseChar('1');
     N = actualWpm - 10;
   }
-  if (N>0) {beepN(upHz, N);}
+  // second digit
+  letterGap();
+  N += 48;
+  sendMorseChar((char)N);
 }
 
 // play N system beeps
