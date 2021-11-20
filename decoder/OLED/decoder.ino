@@ -1,23 +1,20 @@
 
 // ============================================================
-// A Morse Code Iambic Keyer  >> rev c
+// decoder.ino :: An Iambic Keyer and Decoder  (4x11 OLED)
 //
 // (c) Scott Baker KJ7NLA
 // ============================================================
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 
-#define BAUDRATE 115200
+const uint8_t pinDit  = 2;  // dit key input
+const uint8_t pinDah  = 3;  // dah key input
+const uint8_t pinSw1  = 7;  // push-button switch
+const uint8_t pinBuzz = 8;  // buzzer/speaker pin
 
-#define DEBUG 1      // uncomment for debug
-
-const uint8_t pinDit  = 2;      // dit key input
-const uint8_t pinDah  = 3;      // dah key input
-const uint8_t pinSw1  = 7;      // push-button switch
-const uint8_t pinBuzz = 8;      // buzzer/speaker pin
-
+#define VERSION   "1.01x"
+//#define DEBUG 1           // uncomment for debug
 
 // Morse-to-ASCII lookup table
 const char m2a[128] PROGMEM =
@@ -54,48 +51,62 @@ const uint8_t a2m[64] PROGMEM =
 volatile uint8_t  event    = NBP;
 volatile uint8_t  menumode = RUN_MODE;
 
-#define DITCONST  900        // dit time constant
-#define MAXWPM    30         // max keyer speed
-#define INITWPM   20         // max keyer speed
-#define MINWPM    15         // min keyer speed
+#define DITCONST  1200       // dit time constant
+#define MAXWPM    40         // max keyer speed
+#define INITWPM   25         // startup keyer speed
+#define MINWPM    10         // min keyer speed
 
-// 4x20 LCD
-#define COLSIZE    20
+// 4x11 OLED
+#define COLSIZE   11
 #define ROWSIZE    4
-#define MAXCOL     COLSIZE-1
-#define MAXROW     ROWSIZE-1
+#define MAXCOL    COLSIZE-1  // max display column
+#define MAXLINE   ROWSIZE-1  // max display row
 
-// Class instantiations
-LiquidCrystal_I2C lcd(0x27, COLSIZE, ROWSIZE);
+#define BAUDRATE 115200
+#define OLED_ADDRESS 0x3C
 
-uint8_t maddr  = 1;
-uint8_t myrow  = 0;
-uint8_t mycol  = 0;
+#include "OledAscii.h"      // OLED driver
 
+// Class instantiation
+Oled oled;
+
+uint8_t maddr = 1;
+uint8_t myrow = 0;
+uint8_t mycol = 0;
+char tmpstr[12];
+
+void oled_init();
 char lookup_cw(uint8_t x);
 void print_cw(void);
+void set_cursor(uint8_t col, uint8_t row);
+void print_line(uint8_t row, char *str);
+void clear_line(uint8_t row);
 void printchar(char ch);
 void maddr_cmd(uint8_t cmd);
+inline void read_switch(void);
 void read_paddles(void);
 void iambic_keyer(void);
 void straight_key(void);
 void send_cwchr(char ch);
 void send_cwmsg(char *str, uint8_t prn);
-void read_switch(void);
 void back2run(void);
 void ditcalc(void);
 void change_wpm(uint8_t wpm);
 void menu_wpm(void);
 void menu_mode(void);
 void menu_msg(void);
-void beepN(uint16_t freq, uint8_t N);
-void beep(uint16_t freq);
-void myDelay(uint8_t dly);
 void doError(void);
 void(*resetFunc) (void) = 0;
 
 #define SKHZ    220    // error beep   = @A4 note
 #define DDHZ    659    // dit/dah beep = @E5 note
+
+// initialize the OLED
+void oled_init() {
+  oled.begin(&Oled128x64, OLED_ADDRESS);
+  oled.setFont(font10x15);
+  oled.clear();
+}
 
 // table lookup for CW decoder
 char lookup_cw(uint8_t addr) {
@@ -109,30 +120,51 @@ char lookup_cw(uint8_t addr) {
   return ch;
 }
 
+// set cursor with font scaling
+void set_cursor(uint8_t col, uint8_t row) {
+  row <<= 1;
+  col *= 10;
+  oled.setCursor(col,row);
+}
+
+// print a line
+void print_line(uint8_t row, char *str) {
+  row <<= 1;
+  oled.setCursor(0,row);
+  oled.print(str);
+  oled.clearToEOL();
+}
+
+// clear a line
+void clear_line(uint8_t row) {
+  row <<= 1;
+  oled.setCursor(0,row);
+  oled.clearToEOL();
+}
+
 // print the ascii char
 void printchar(char ch) {
-  // clear on wrap if wrap char is not <SP>
-  // or when 6-dit command code is received
-  if (((myrow > MAXROW) && (ch != ' ')) ||
-       (ch == '^')) {
-    lcd.clear();
-    myrow = 0;
-    mycol = 0;
-  }
-  if ((myrow <= MAXROW) & (mycol <= MAXCOL)) {
-    lcd.setCursor(mycol, myrow);
-    if (ch != '^') {
-      lcd.print(ch);
+  if ((myrow <= MAXLINE) & (mycol <= MAXCOL)) {
+    set_cursor(mycol,myrow);
+    if (ch == '^') {
+      // clear screen if 6-dit code is received
+      oled.clear();
+      myrow = 0;
+      mycol = 0;
+    } else {
+      oled.print(ch);
       mycol++;
     }
   }
   if (mycol > MAXCOL) {
     mycol = 0;
     myrow++;
+    if (myrow > MAXLINE) myrow = 0;
+    clear_line(myrow);
   }
 }
 
-// convert morse to ascii and print to LCD
+// convert morse to ascii and print
 void print_cw() {
   char ch = lookup_cw(maddr);
   printchar(ch);
@@ -187,14 +219,23 @@ volatile uint8_t  keyswap    = 0;   // key swap
 uint8_t  keyerstate = KEY_IDLE;
 uint8_t  keyerinfo  = 0;
 
-uint32_t dittime;
-uint32_t dahtime;
+uint16_t dittime;        // dit time
+uint16_t dahtime;        // dah time
+uint16_t lettergap1;     // letter space for decode
+uint16_t lettergap2;     // letter space for send
+uint16_t wordgap1;       // word space for decode
+uint16_t wordgap2;       // word space for send
+uint8_t  sw1Pushed = 0;  // button pushed
+
+// read and debounce switch
+inline void read_switch() {
+  sw1Pushed = !digitalRead(pinSw1);
+}
 
 // read and debounce paddles
 void read_paddles() {
   uint8_t ditv1 = !digitalRead(pinDit);
   uint8_t dahv1 = !digitalRead(pinDah);
-  delay(10);
   uint8_t ditv2 = !digitalRead(pinDit);
   uint8_t dahv2 = !digitalRead(pinDah);
   if (ditv1 && ditv2) {
@@ -263,8 +304,8 @@ void iambic_keyer() {
         keyerinfo &= ~KEY_REG;
         if (keyermode == IAMBICA) {
           // Iambic A
-          // check for letter space = 3*dit
-          ktimer = millis() + (dittime<<1);
+          // check for letter space
+          ktimer = millis() + lettergap1;
           keyerstate = LTR_GAP;
         } else {
           // Iambic B
@@ -272,20 +313,20 @@ void iambic_keyer() {
           if (NOKEY && (keyerinfo & BOTH_REG)) {
             // send opposite of last paddle sent
             if (keyerinfo & WAS_DIT) {
-              // send a dit
+              // send a dah
               ktimer = millis() + dahtime;
               maddr_cmd(1);
             }
             else {
               // send a dit
               ktimer = millis() + dittime;
-              maddr_cmd(1);
+              maddr_cmd(0);
             }
             keyerinfo = 0;
             keyerstate = KEY_WAIT;
           } else {
-            // check for letter space = 3*dit
-            ktimer = millis() + (dittime<<1);
+            // check for letter space
+            ktimer = millis() + lettergap1;
             keyerstate = LTR_GAP;
           }
         }
@@ -293,11 +334,10 @@ void iambic_keyer() {
       break;
     case LTR_GAP:
       if (millis() > ktimer) {
-        // letter gap found
-        // so print char
+        // letter space found so print char
         maddr_cmd(2);
-        // check for word space = 6*dit
-        ktimer = millis() + dittime + (dittime<<1);
+        // check for word space
+        ktimer = millis() + wordgap1;
         keyerstate = WORD_GAP;
       }
       read_paddles();
@@ -309,8 +349,7 @@ void iambic_keyer() {
       break;
     case WORD_GAP:
       if (millis() > ktimer) {
-        // word gap found
-        // so print a space
+        // word gap found so print a space
         maddr = 1;
         print_cw();
         keyerstate = KEY_IDLE;
@@ -333,7 +372,7 @@ void straight_key() {
   if (!digitalRead(pin)) {
     tone(pinBuzz, DDHZ);
     while(!digitalRead(pin)) {
-      delay(10);
+      delay(1);
     }
     noTone(pinBuzz);
   }
@@ -347,12 +386,12 @@ void send_cwchr(char ch) {
   uint8_t addr = (uint8_t)ch - 0x20;
   // then lookup the Morse code from the a2m table
   // note: any unknown unknown ascii char is
-  // translated to a ? (mcode 0x4c)
+  // translated to a '?' (mcode 0x4c)
   if (addr < 64) mcode = pgm_read_byte(a2m + addr);
   else mcode = 0x4c;
   // if space (mcode 0x01) is found
   // then wait for one word space
-  if (mcode == 0x01) delay(dittime << 2);
+  if (mcode == 0x01) delay(wordgap2);
   else {
     uint8_t mask = 0x80;
     // use a bit mask to find the leftmost 1
@@ -371,11 +410,9 @@ void send_cwchr(char ch) {
       // turn the side-tone off for a symbol space
       delay(dittime);
     }
-    delay(dittime << 1);  // add letter space
+    delay(lettergap2);  // add letter space
   }
 }
-
-volatile uint8_t sw1Pushed = 0;
 
 // transmit a CW message
 void send_cwmsg(char *str, uint8_t prn) {
@@ -389,26 +426,13 @@ void send_cwmsg(char *str, uint8_t prn) {
   }
 }
 
-// read and debounce switch
-void read_switch() {
-  uint8_t sw1V1 = !digitalRead(pinSw1);
-  delay(10);
-  uint8_t sw1V2 = !digitalRead(pinSw1);
-  if (sw1V1 && sw1V2) {
-    sw1Pushed = 1;
-  }
-  if (!(sw1V1 || sw1V2)) {
-    sw1Pushed = 0;
-  }
-}
-
 // back to run mode
 void back2run() {
   menumode = RUN_MODE;
-  lcd.clear();
-  lcd.print("READY >>");
+  oled.clear();
+  print_line(0, "READY >>");
   delay(700);
-  lcd.clear();
+  clear_line(0);
   myrow = 0;
   mycol = 0;
 }
@@ -417,8 +441,12 @@ uint8_t keyerwpm;
 
 // initial keyer speed
 void ditcalc() {
-  dittime = DITCONST/keyerwpm;
-  dahtime = dittime + (dittime << 1);
+  dittime    = DITCONST/keyerwpm;
+  dahtime    = (DITCONST * 3)/keyerwpm;
+  lettergap1 = (DITCONST * 2.5)/keyerwpm;
+  lettergap2 = (DITCONST * 3)/keyerwpm;
+  wordgap1   = (DITCONST * 3)/keyerwpm;
+  wordgap2   = (DITCONST * 7)/keyerwpm;
 }
 
 // change the keyer speed
@@ -431,10 +459,14 @@ void change_wpm(uint8_t wpm) {
 // increase or decrease keyer speed
 void menu_wpm() {
   uint8_t prev_wpm = keyerwpm;
-  lcd.clear();
-  lcd.setCursor(0,3);
-  lcd.print("SPEED IS:");
-  sw1Pushed = 0;
+  oled.clear();
+  print_line(0, "SPEED IS");
+  // wait until button is released
+  while (sw1Pushed) {
+    read_switch();
+    delay(10);
+  }
+  // loop until button is pressed
   while (!sw1Pushed) {
     read_switch();
     keyerinfo = 0;
@@ -451,13 +483,12 @@ void menu_wpm() {
     while (GOTKEY) {
       keyerinfo = 0;
       read_paddles();
-      delay(100);
+      delay(10);
     }
     keyerinfo = 0;
-    lcd.setCursor(10,3);
-    lcd.print(keyerwpm);
-    lcd.setCursor(13,3);
-    lcd.print("WPM");
+    itoa(keyerwpm,tmpstr,10);
+    strcat(tmpstr," WPM");
+    print_line(1, tmpstr);
   }
   delay(10); // debounce
   // if wpm changed the recalculate the
@@ -472,9 +503,8 @@ void menu_wpm() {
 // select keyer mode
 void menu_mode() {
   uint8_t prev_mode = keyermode;
-  lcd.clear();
-  lcd.setCursor(0,3);
-  lcd.print("KEYER IS:");
+  oled.clear();
+  print_line(0, "KEYER IS");
   // wait until button is released
   while (sw1Pushed) {
     read_switch();
@@ -485,11 +515,8 @@ void menu_mode() {
     read_switch();
     keyerinfo = 0;
     read_paddles();
-    if (keyerinfo & DAH_REG) {
+    if (keyerinfo & KEY_REG) {
       keyermode++;
-    }
-    if (keyerinfo & DIT_REG) {
-      keyermode--;
     }
     if (keyermode > IAMBICB) {
       keyermode = IAMBICA;
@@ -497,19 +524,18 @@ void menu_mode() {
     while (GOTKEY) {
       keyerinfo = 0;
       read_paddles();
-      delay(100);
+      delay(10);
     }
     keyerinfo = 0;
-    lcd.setCursor(10,3);
     switch (keyermode) {
       case IAMBICA:
-        lcd.print("IAMBIC A");
+        print_line(1, "IAMBIC A");
         break;
       case IAMBICB:
-        lcd.print("IAMBIC B");
+        print_line(1, "IAMBIC B");
         break;
       default:
-        lcd.print("ERROR");
+        print_line(1, "ERROR");
         break;
     }
   }
@@ -520,54 +546,20 @@ void menu_mode() {
 
 // send a message
 void menu_msg() {
-  uint8_t savedwpm = keyerwpm;
-  change_wpm(15);
-  char *msg = "ALL WORK AND NO PLAY MAKES JACK A DULL BOY.  ";
+  char *msg = "ALL WORK  AND NO PLAY MAKES  JACK A DULL BOY. ";
   myrow = 0;
   mycol = 0;
-  lcd.clear();
+  oled.clear();
   // wait until button is released
   while (sw1Pushed) {
     read_switch();
-    delay(10);
+    delay(1);
   }
   // loop until button is pressed
   while (!sw1Pushed) {
     send_cwmsg(msg, 1);
   }
-  // restore the original keyer speed
-  change_wpm(savedwpm);
   back2run();
-}
-
-// play N system beeps
-void beepN(uint16_t freq, uint8_t N) {
-  uint8_t i;
-  for (i=0; i<N; i++) {
-    beep(freq);
-  }
-}
-
-#define BEEPLEN 69     // system beep  length
-#define BEEPDLY 99     // system delay length
-
-// play system beep
-void beep(uint16_t freq) {
-  tone(pinBuzz, freq);
-  myDelay(BEEPLEN);
-  noTone(pinBuzz);
-  myDelay(BEEPDLY);
-}
-
-// delay with paddle update
-void myDelay(uint8_t dly) {
-  unsigned long startTime = millis();
-  unsigned long curTime = startTime;
-  unsigned long endTime = startTime + dly;
-  while(curTime < endTime) {
-    read_paddles();
-    curTime = millis();
-  }
 }
 
 // reset the Arduino
@@ -583,12 +575,14 @@ void setup() {
   pinMode(pinSw1,  INPUT_PULLUP);
   pinMode(pinBuzz, OUTPUT);
   // startup init
-  Serial.begin(BAUDRATE);  // init serial/debug port
-  change_wpm(INITWPM);     // init keyer speed
-  lcd.init();              // init LCD display
-  lcd.backlight();
-  lcd.clear();
-  lcd.noCursor();
+  Serial.begin(BAUDRATE);      // init serial/debug port
+  change_wpm(INITWPM);         // init keyer speed
+  oled_init();                 // init the display
+  print_line(0, "Decoder");
+  print_line(1, "Version");
+  print_line(2, VERSION);
+  delay(1500);
+  oled.clear();
 }
 
 // main loop
@@ -597,7 +591,7 @@ void loop() {
   read_switch();
   if (sw1Pushed) {
     event = BSC;
-    delay(100); // debounce
+    delay(10); // debounce
     t0 = millis();
     // check for long button press
     while (sw1Pushed && (event != BPL)) {
@@ -605,34 +599,27 @@ void loop() {
       read_switch();
       delay(10);  // debounce
     }
-  }
-  // button single click
-  if (event == BSC) {
-    switch (menumode) {
-      case RUN_MODE:
-        menumode = SETUP;
-        break;
-      default:
-        menumode = 0;
-    }
-    event = NBP;
-  }
 
-  // long button press
-  if (event == BPL) {
-    menu_msg();
-    event = NBP;
-  }
-
-  switch (menumode) {
-    case RUN_MODE:
-      iambic_keyer();
-      break;
-    case SETUP:
+    // button single click
+    if (event == BSC) {
+      switch (menumode) {
+        case RUN_MODE:
+          menumode = SETUP;
+          break;
+        default:
+          menumode = 0;
+      }
       menu_wpm();
-      break;
-    default:
-      break;
+      event = NBP;
+    }
+
+    // long button press
+    else if (event == BPL) {
+      menu_msg();
+      event = NBP;
+    }
   }
+  // no buttons pressed
+  iambic_keyer();
 }
 
