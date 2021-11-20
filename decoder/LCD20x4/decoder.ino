@@ -62,7 +62,7 @@ volatile uint8_t  menumode = RUN_MODE;
 #define ROWSIZE    4
 #define MAXCOL    COLSIZE-1  // max display column
 #define MAXLINE   ROWSIZE-1  // max display row
-#define SPACES    "                    "
+#define SPACES    "          "
 
 #define BAUDRATE 115200
 #define LCD_ADDRESS 0x27
