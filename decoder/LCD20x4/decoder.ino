@@ -62,7 +62,8 @@ volatile uint8_t  menumode = RUN_MODE;
 #define ROWSIZE    4
 #define MAXCOL    COLSIZE-1  // max display column
 #define MAXLINE   ROWSIZE-1  // max display row
-#define SPACES    "          "
+#define SPACE10   "          "
+#define SPACE20   "                    "
 
 #define BAUDRATE 115200
 #define LCD_ADDRESS 0x27
@@ -115,13 +116,13 @@ char lookup_cw(uint8_t addr) {
 void print_line(uint8_t row, char *str) {
   lcd.setCursor(0,row);
   lcd.print(str);
-  lcd.print(SPACES);
+  lcd.print(SPACE10);
 }
 
 // clear a line
 void clear_line(uint8_t row) {
   lcd.setCursor(0,row);
-  lcd.print(SPACES);
+  lcd.print(SPACE20);
 }
 
 // print the ascii char
